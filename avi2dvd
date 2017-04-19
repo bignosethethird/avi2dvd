@@ -1,0 +1,256 @@
+#!/bin/bash
+printf "Version: %s\n"  "$Id: avi2dvd 4 2011-11-23 23:12:57Z gerrit_hoekstra $"
+# Author:  Gerrit Hoekstra www.hoekstra.co.uk
+#          Also check out BigNoseLinux, a Gentoo-based distro for
+#          SUN SPARC II ULTRA Workstations at www.bignoselinux.org
+#
+# License: GPL2, m'kay?
+#
+# For Gentoo-based Linux users:
+# You need to have the following packages installed:
+#   emerge app-cdr/dvd+rw-tools
+#   emerge media-video/mplayer
+#   emerge media-video/dvdauthor
+#
+# For Debian-based Linux users:
+# You need to have the following packages installed:
+#   apt-get install mplayer
+#   apt-get install dvdauthor
+#   apt-get install mencoder
+#
+# ChangeLog:
+# 1.00      First Release
+# 1.01      More helpful user messages
+# 1.02      Bit more tweaking
+# 1.03      Deal with long logical volume names
+
+function Usage {
+  printf "
+Usage: ${0##*/} file-path.avi
+
+Function:
+Converts an AVI file to a DVD file structure and writes it to DVD
+in 2-minute chapters.
+
+Requirements:
+You will need the following open source utilities on your system, which
+most LINUX-based O/S have pre-built packages of:
+ 1. mplayer    http://www.mplayerhq.hu
+ 2. growisofs  http://fy.chalmers.se/~appro/linux/DVD+RW
+ 3. mencoder   http://www.mplayerhq.hu
+ 4. dvdauthor  http://dvdauthor.sourceforge.net
+You also need to have a DVD-writer, some blank DVD's etc...
+
+Note: The average AVI-movie to DVD conversion takes around 30 minutes on a
+      medium spec machine. A 700MB avi file results in a 3.5GB DVD image, so
+      ensure you have enough available disk space. The resulting DVD image
+      is not removed if this script does not detect a DVD writer, in order
+      for you to manually burn the DVD later on. This DVD image is in the
+      same directory as the source .avi file, so do your own housekeeping
+      after you have manually burned the DVD.
+"
+  exit 1
+}
+
+# Death to the evil process, for it must die.
+# Parameters:   Error message
+function die {
+  if [[ -z $1 ]]; then
+    printf "failed.\nExiting...\n"
+  else
+    printf "*** $1 ***\nExiting...\n"
+  fi
+  exit 1
+}
+function warn {
+  printf "Warning: $1\n"
+}
+function info {
+  printf "$1... "
+}
+function doneit {
+  if [[ -n $1 ]]; then
+    printf "$1, done\n"
+  else
+    printf "done\n"
+  fi
+}
+
+#============================================================================#
+# 'ere we go!
+# Get start time
+STARTTIME=$(date +%s)
+AVIFILE=${1}
+[[ -z $AVIFILE ]] && Usage
+MPGFILE=${1%.*}.mpg
+XMLFILE=${1%.*}.xml
+DVDDIR=${1%.*}
+
+info "Checking environment"
+GROWISOFS=`which growisofs 2>/dev/null`
+[[ -z $GROWISOFS ]] && warn "growisofs does not appear to be installed.
+Use another utility to burn the content of directory ${DVDDIR} to a DVD"
+MPLAYER=`which mplayer 2>/dev/null`
+[[ -z $MPLAYER ]] && die "mplayer is not installed."
+MENCODER=`which mencoder 2>/dev/null`
+[[ -z $MENCODER ]] && die "mencoder is not installed."
+DVDAUTHOR=`which dvdauthor 2>/dev/null`
+[[ -z $DVDAUTHOR ]] && die "dvdauthor is not installed."
+doneit
+
+info "Checking DVD writer"
+DVDWRITERS=(`ls /dev/dvd* 2>/dev/null | grep w`)
+if [[ ${#DVDWRITERS[*]} -gt 1 ]]; then
+  printf "\n - There seems to me more than one DVD writer. Pick one:\n"
+  i=0
+  while : ; do
+    printf " $((i+1)): ${DVDWRITERS[$i]}\n"
+    i=$((i+1))
+    [[ $i -ge ${#DVDWRITERS[*]}  ]] && break
+  done
+  read
+  if [[ $REPLY -lt 1 || $REPLY -ge ${#DVDWRITERS[*]} ]]; then
+    die "Duff input of '${REPLY}'"
+  fi
+  DVDWRITER=${DVDWRITERS[$((REPLY-1))]}
+  doneit "${DVDWRITER}"
+else
+  DVDWRITER=${DVDWRITERS[0]}
+  if [[ -n $DVDWRITER ]]; then
+    doneit "${DVDWRITER}"
+  else
+    printf "no DVD writer found.
+Note: If you do actually have a DVD writer, create a link to it called 
+      something like this /dev/dvdrw for next time. 
+      Continuing conversion process.\n"
+  fi
+fi
+
+
+info "Checking file access"
+[[ ! -a ${AVIFILE} ]] &&  die "Source file \"${AVIFILE}\" is not readable by user \"${USER}\""
+doneit
+
+info "Checking available workspace"
+# Required DVD space is at least 4.6 times the size of the avi file
+# Required MP4 space is at least 4.1 times the size of the avi file
+FILESIZE=$(stat -c%s "${AVIFILE}")
+REQDISKSPACE=$(echo $FILESIZE | awk '{print $1 * 8.7 / 1024 / 1000}')
+REQDISKSPACE=${REQDISKSPACE%.*}
+AVAILDISKSPACE=$(df -m . | sed -e '1d' -e :a -e '$!N; s/\n/ /; ta' | awk '{printf $4}')
+[[ $REQDISKSPACE -gt $AVAILDISKSPACE ]] && die "not enough disk space available"
+doneit
+
+info "Checking video screen size"
+SCREENSIZE=$(file "${AVIFILE}" | cut -f2 -d':' | cut -f3 -d',')
+if [[ -z $SCREENSIZE ]]; then
+  die "Could not determine video size. Probably not an AVI file."
+fi
+SCREENWIDTH=$(echo  $SCREENSIZE | cut -f1 -dx | sed -e 's/ //g')
+SCREENHEIGHT=$(echo $SCREENSIZE | cut -f2 -dx | sed -e 's/ //g')
+if [[ -z $SCREENWIDTH ]]; then 
+  die "Could not determine video width. Probably not an AVI file."
+fi
+if [[ -z $SCREENHEIGHT ]]; then 
+  die "Could not determine video height. Probably not an AVI file."
+fi
+doneit "height=${SCREENHEIGHT}, width=${SCREENWIDTH}"
+
+info "Checking aspect ratio"
+ASPECTRATIO=$(echo "${SCREENWIDTH} ${SCREENHEIGHT}" | awk '{printf $1/$2}' | sed -e 's/\([0-9]\{3\}\).*$/\1/' )
+doneit "$ASPECTRATIO"
+
+info "Calculating screen aspect ratio"
+ASPECT=$(echo $ASPECTRATIO | awk '{if($1>2.00){printf "16/9"}else{printf "4/3"}}')
+doneit "$ASPECT"
+
+info "Checking video length"
+LENGTH=$(${MPLAYER} -vo dummy -ao dummy -identify "${AVIFILE}" 2>&1 | grep ID_LENGTH | cut -f2 -d=)
+if [[ -z $LENGTH ]]; then
+  die "Could not determine length. Probably not an AVI file."
+fi
+# strip decimals
+LENGTH=${LENGTH%.*}
+LENGTHMIN=$(echo $LENGTH | awk '{print $1 / 60 }')
+LENGTHMIN=${LENGTHMIN%.*}
+doneit "${LENGTH} seconds ($LENGTHMIN minutes)"
+
+info "Making XML file ${XMLFILE}"
+# Make 2-minute chapters 0:00,2:00,4:00 etc...
+CHAPTERS="0:00"
+i=0
+while : ; do
+  i=$((i+1))
+  MINS10=$((i*120))
+  [[ ${MINS10} -gt ${LENGTH} ]] && break
+  CHAPTERS=${CHAPTERS},$((i*2)):00
+done
+info "with $i 2-minute chapters"
+cat > "${XMLFILE}" << !
+<dvdauthor>
+  <vmgm />
+  <titleset>
+     <titles>
+        <pgc>
+          <vob file="${MPGFILE}" chapters="$CHAPTERS" />
+        </pgc>
+     </titles>
+  </titleset>
+</dvdauthor>
+!
+doneit
+
+info "Checking audio encoding"
+AUDIOFORMAT=$(${MPLAYER} -vo dummy -ao dummy -identify "${AVIFILE}"  2>&1 | grep AUDIO_FORMAT | cut -d '=' -f 2)
+if [[ $AUDIOFORMAT = "hwac3" ]] ; then
+  doneit "AC3 encoding"
+  info "Making ${MPGFILE} from ${AVIFILE}"
+  $MENCODER -oac copy -ovc lavc -of mpeg -mpegopts format=dvd -vf scale=720:576,harddup \
+    -lavcopts vcodec=mpeg2video:vrc_buf_size=1835:vrc_maxrate=9800:vbitrate=5000:keyint=15:aspect=${ASPECT} \
+    -ofps 25 -o "${MPGFILE}" "${AVIFILE}" 1>/dev/null 2>&1
+else
+  doneit "Non-AC3 encoding"
+  info "Making ${MPGFILE} from ${AVIFILE}"
+  $MENCODER -oac lavc -ovc lavc -of mpeg -mpegopts format=dvd -vf scale=720:576,harddup \
+    -srate 48000 -af lavcresample=48000 -lavcopts \
+    vcodec=mpeg2video:vrc_buf_size=1835:vrc_maxrate=9800:vbitrate=5000:keyint=15:aspect=${ASPECT}:acodec=ac3:abitrate=192 \
+    -ofps 25 -o "${MPGFILE}" "${AVIFILE}" 1>/dev/null 2>&1
+fi
+doneit
+
+info "Creating DVD image to ${DVDDIR}"
+rm -fr ${DVDDIR}
+${DVDAUTHOR} -o "${DVDDIR}" -x "${XMLFILE}" 1>/dev/null 2>&1
+doneit
+
+if [[ -z  ${DVDWRITER} ]]; then
+  printf "
+Directory \"${DVDDIR}\" contains the final DVD image.
+When you have identified your DVD writer, e.g. /dev/dvdrw, you can burn the
+DVD using a another program like K3B, or execute this command:
+
+  $GROWISOFS -dvd-compat -Z /dev/dvdrw -dvd-video \"${DVDDIR}\"
+
+When you are done manually burning the DVD, you need to also clean up:
+
+  rm -fr \"${DVDDIR}\"\n\n"
+else
+  info "Writing DVD"
+  $GROWISOFS -dvd-compat -Z ${DVDWRITER} -dvd-video "${DVDDIR}" 1>/dev/null 2>&1
+  doneit
+fi
+
+if [[ -n  ${DVDWRITER} ]]; then
+  info "Ejecting DVD from ${DVDWRITER}"
+  eject ${DVDWRITER}
+  doneit
+fi
+
+info "Cleaning up"
+rm "${MPGFILE}"
+rm "${XMLFILE}"
+[[ -n ${DVDWRITER} ]] && rm -fr "${DVDDIR}"
+doneit
+
+ENDTIME=$(date +%s)
+echo "$ENDTIME $STARTTIME" | awk '{printf "Duration: " ($1-$2)/60 " minutes\n"}'
